@@ -62,17 +62,23 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 
 | Tool | What it does |
 | --- | --- |
+| `dailyBrief` | Today's recovery vs 7-day baseline, warning flags, last 7 days, next 3 days |
+| `getAthleteSettings` | Weight, max/threshold HR, threshold pace, HR and pace zones |
 | `getRecentActivities` | Recent training history (compact: km, pace, HR, D+, load, RPE) |
 | `getActivity` | One activity with its laps/intervals |
 | `getWellness` | Sleep, HRV, resting HR, weight, fitness/fatigue/form |
 | `logWeight` | Records body weight for a day |
+| `logWellness` | Records soreness, fatigue, stress, mood, motivation, injury, sleep quality, notes |
+| `updateActivity` | Adds RPE, feel, name or notes to a completed activity |
 | `listUpcomingEvents` | Calendar over any date range, compact by default |
 | `getEvent` | Full description and steps of one planned event |
 | `weeklySummary` | Planned vs done per week (run km, hours, strength, D+, load) |
 | `createWorkout` | Writes a structured workout, which syncs to Garmin |
 | `updateWorkout` | Edits an existing planned workout |
 | `bulkUpdateWorkouts` | Edits up to 50 planned workouts in one call |
+| `createEvents` | Creates up to 50 workouts, races or notes in one call |
 | `deleteEvent` | Removes a planned workout |
+| `deleteEvents` | Removes up to 50 events in one call |
 
 Read tools return a compact summary by default to keep responses small; pass `full: true` for the raw intervals.icu objects. Ranges accept `oldest` / `newest` (YYYY-MM-DD).
 

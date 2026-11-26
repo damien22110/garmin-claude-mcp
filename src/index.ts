@@ -86,7 +86,7 @@ const range = {
 };
 
 export class MyMCP extends McpAgent<Env & Secrets> {
-  server = new McpServer({ name: "Intervals.icu", version: "2.0.0" });
+  server = new McpServer({ name: "Intervals.icu", version: "2.1.0" });
 
   private authHeader() {
     return `Basic ${btoa(`API_KEY:${this.env.INTERVALS_API_KEY}`)}`;
@@ -249,14 +249,18 @@ export class MyMCP extends McpAgent<Env & Secrets> {
           const w = weekStart(date);
           if (!weeks.has(w)) weeks.set(w, { week: w });
           const row = weeks.get(w)!;
-          row[kind] ??= { runKm: 0, runH: 0, otherH: 0, strength: 0, dplus: 0, load: 0, sessions: 0 };
+          row[kind] ??= { runKm: 0, runH: 0, otherH: 0, strength: 0, mobility: 0, dplus: 0, load: 0, sessions: 0 };
           return row[kind];
         };
         const add = (b: Json, x: Json) => {
           const h = (x.moving_time ?? 0) / 3600;
           b.sessions += 1;
           b.load += x.icu_training_load ?? 0;
-          if (x.type === "WeightTraining") b.strength += 1;
+          if (x.type === "WeightTraining") {
+            // Short WeightTraining entries are mobility/foot-care, not real strength sessions.
+            if ((x.moving_time ?? 0) >= 15 * 60) b.strength += 1;
+            else b.mobility += 1;
+          }
           else if (String(x.type).includes("Run")) {
             b.runKm += (x.distance ?? 0) / 1000;
             b.runH += h;
@@ -279,11 +283,80 @@ export class MyMCP extends McpAgent<Env & Secrets> {
             otherH: round(b.otherH, 1),
             dplus: Math.round(b.dplus) || undefined,
             load: Math.round(b.load),
+            mobility: b.mobility || undefined,
           };
         const rows = [...weeks.values()]
           .sort((a, b) => a.week.localeCompare(b.week))
           .map((r) => clean({ week: r.week, planned: fmt(r.planned), done: fmt(r.done) }));
         return text(rows);
+      },
+    );
+
+    this.server.tool(
+      "dailyBrief",
+      "One-call coaching check-in: today's recovery vs 7-day baseline (HRV, resting HR, sleep), fitness/fatigue/form, last 7 days done, and the next 3 days planned.",
+      {},
+      async () => {
+        const today = isoDate(new Date());
+        const [well, acts, evs]: Json[][] = await Promise.all([
+          this.icu(`/athlete/${athlete}/wellness?oldest=${daysFromNow(-7)}&newest=${today}`),
+          this.icu(`/athlete/${athlete}/activities?oldest=${daysFromNow(-7)}`),
+          this.icu(`/athlete/${athlete}/events?oldest=${today}&newest=${daysFromNow(3)}`),
+        ]);
+        const w = well.map(compactWellness);
+        const last = w[w.length - 1] ?? {};
+        const prior = w.slice(0, -1);
+        const avg = (k: string) => {
+          const v = prior.map((x) => x[k]).filter((n) => typeof n === "number");
+          return v.length ? round(v.reduce((a, b) => a + b, 0) / v.length, 1) : undefined;
+        };
+        const baseline = clean({ hrv: avg("hrv"), restingHR: avg("restingHR"), sleepH: avg("sleepH") });
+        const flags: string[] = [];
+        if (last.hrv && baseline.hrv && last.hrv < baseline.hrv * 0.9) flags.push("HRV >10% below 7-day average");
+        if (last.restingHR && baseline.restingHR && last.restingHR > baseline.restingHR + 4)
+          flags.push("Resting HR >4 bpm above average");
+        if (last.sleepH !== undefined && last.sleepH < 6.5) flags.push("Short sleep (<6.5 h)");
+        if (typeof last.form === "number" && last.form < -20) flags.push("Form below -20 (high fatigue)");
+        const runs = acts.filter((a) => String(a.type).includes("Run"));
+        return text({
+          today: last,
+          baseline7d: baseline,
+          flags,
+          last7days: {
+            sessions: acts.length,
+            runKm: round(runs.reduce((t, a) => t + (a.distance ?? 0), 0) / 1000, 1),
+            runH: round(runs.reduce((t, a) => t + (a.moving_time ?? 0), 0) / 3600, 1),
+            dplus: Math.round(runs.reduce((t, a) => t + (a.total_elevation_gain ?? 0), 0)),
+            load: Math.round(acts.reduce((t, a) => t + (a.icu_training_load ?? 0), 0)),
+            activities: acts.map(compactActivity),
+          },
+          next3days: evs.map((e) => compactEvent(e)),
+        });
+      },
+    );
+
+    this.server.tool(
+      "getAthleteSettings",
+      "Athlete profile and zones: weight, max/threshold HR, threshold pace, HR and pace zones per sport.",
+      { full: z.boolean().optional().describe("Return the raw athlete object") },
+      async ({ full }) => {
+        const a = await this.icu(`/athlete/${athlete}`);
+        if (full) return text(a);
+        const sports = ((a.sportSettings ?? []) as Json[]).map((s) =>
+          clean({
+            types: s.types,
+            maxHR: s.max_hr,
+            lthr: s.lthr,
+            restingHR: s.resting_hr ?? a.icu_resting_hr,
+            thresholdPace: pace(s.threshold_pace),
+            hrZones: s.hr_zones,
+            hrZoneNames: s.hr_zone_names,
+            paceZones: s.pace_zones,
+            paceZoneNames: s.pace_zone_names,
+            ftp: s.ftp,
+          }),
+        );
+        return text(clean({ name: a.name, weight: a.icu_weight ?? a.weight, sex: a.sex, sports }));
       },
     );
 
@@ -355,6 +428,126 @@ export class MyMCP extends McpAgent<Env & Secrets> {
             results.push({ ok: true, ...compactEvent(data) });
           } catch (err) {
             results.push({ ok: false, id: eventId, error: String(err) });
+          }
+        }
+        return text(results);
+      },
+    );
+
+    this.server.tool(
+      "logWellness",
+      "Record how the athlete feels for a day (any subset). Scales 1-4 where 1 = best (none/low) and 4 = worst, except mood/motivation where 1 = great. Also weight, sleep quality, kcal eaten, free-text comment.",
+      {
+        date: z.string().optional().describe("YYYY-MM-DD, default today"),
+        weight: z.number().optional(),
+        soreness: z.number().int().min(1).max(4).optional(),
+        fatigue: z.number().int().min(1).max(4).optional(),
+        stress: z.number().int().min(1).max(4).optional(),
+        mood: z.number().int().min(1).max(4).optional(),
+        motivation: z.number().int().min(1).max(4).optional(),
+        injury: z.number().int().min(1).max(4).optional(),
+        sleepQuality: z.number().int().min(1).max(4).optional(),
+        kcalConsumed: z.number().optional(),
+        comments: z.string().optional(),
+      },
+      async ({ date, ...fields }) => {
+        const day = date ?? isoDate(new Date());
+        const data = await this.icu(`/athlete/${athlete}/wellness/${day}`, {
+          method: "PUT",
+          body: JSON.stringify(clean({ id: day, ...fields })),
+        });
+        return text(
+          clean({
+            ...compactWellness(data),
+            soreness: data.soreness,
+            fatigue: data.fatigue,
+            stress: data.stress,
+            mood: data.mood,
+            motivation: data.motivation,
+            injury: data.injury,
+            comments: data.comments,
+          }),
+        );
+      },
+    );
+
+    this.server.tool(
+      "updateActivity",
+      "Annotate a completed activity: rename, add notes, set RPE (1-10) and feel (1 = strong ... 5 = weak).",
+      {
+        activityId: z.string(),
+        name: z.string().optional(),
+        description: z.string().optional(),
+        rpe: z.number().int().min(1).max(10).optional(),
+        feel: z.number().int().min(1).max(5).optional(),
+      },
+      async ({ activityId, name, description, rpe, feel }) => {
+        const data = await this.icu(`/activity/${activityId}`, {
+          method: "PUT",
+          body: JSON.stringify(clean({ name, description, icu_rpe: rpe, feel })),
+        });
+        return text(compactActivity(data));
+      },
+    );
+
+    this.server.tool(
+      "createEvents",
+      "Create several calendar events in one call: workouts, races (RACE_A/B/C) or notes. Returns per-item status.",
+      {
+        events: z
+          .array(
+            z.object({
+              date: z.string().describe("YYYY-MM-DD"),
+              category: z.enum(["WORKOUT", "RACE_A", "RACE_B", "RACE_C", "NOTE"]).optional().describe("Default WORKOUT"),
+              name: z.string(),
+              type: z.string().optional().describe("Run, Ride, WeightTraining... (needed for WORKOUT/RACE)"),
+              description: z.string().optional(),
+              minutes: z.number().optional().describe("Planned duration, for races or notes without steps"),
+              km: z.number().optional().describe("Planned distance"),
+            }),
+          )
+          .min(1)
+          .max(50),
+      },
+      async ({ events }) => {
+        const results: Json[] = [];
+        for (const e of events) {
+          try {
+            const data = await this.icu(`/athlete/${athlete}/events`, {
+              method: "POST",
+              body: JSON.stringify(
+                clean({
+                  start_date_local: `${e.date}T00:00:00`,
+                  category: e.category ?? "WORKOUT",
+                  type: e.type,
+                  name: e.name,
+                  description: e.description,
+                  moving_time: e.minutes ? Math.round(e.minutes * 60) : undefined,
+                  distance: e.km ? Math.round(e.km * 1000) : undefined,
+                }),
+              ),
+            });
+            results.push({ ok: true, ...compactEvent(data) });
+          } catch (err) {
+            results.push({ ok: false, name: e.name, date: e.date, error: String(err) });
+          }
+        }
+        return text(results);
+      },
+    );
+
+    this.server.tool(
+      "deleteEvents",
+      "Delete several calendar events in one call. Returns per-item status.",
+      { eventIds: z.array(z.number()).min(1).max(50) },
+      async ({ eventIds }) => {
+        const results: Json[] = [];
+        for (const id of eventIds) {
+          try {
+            await this.icu(`/athlete/${athlete}/events/${id}`, { method: "DELETE" });
+            results.push({ ok: true, id });
+          } catch (err) {
+            results.push({ ok: false, id, error: String(err) });
           }
         }
         return text(results);
