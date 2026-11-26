@@ -290,6 +290,7 @@ export class MyMCP extends McpAgent<Env & Secrets> {
 
     this.server.tool(
       "createWorkout",
+      "Add a planned workout to the calendar. intervals.icu parses the description into structured steps and syncs it to Garmin.",
       {
         date: z.string().describe("YYYY-MM-DD"),
         name: z.string(),
@@ -307,6 +308,7 @@ export class MyMCP extends McpAgent<Env & Secrets> {
 
     this.server.tool(
       "updateWorkout",
+      "Change one planned workout. Only the fields given are modified.",
       {
         eventId: z.number().describe("Event ID from listUpcomingEvents"),
         date: z.string().optional().describe("YYYY-MM-DD"),
@@ -360,6 +362,7 @@ export class MyMCP extends McpAgent<Env & Secrets> {
 
     this.server.tool(
       "deleteEvent",
+      "Delete one calendar event (workout, note or race).",
       { eventId: z.number().describe("Event ID from listUpcomingEvents") },
       async ({ eventId }) => {
         const data = await this.icu(`/athlete/${athlete}/events/${eventId}`, { method: "DELETE" });
