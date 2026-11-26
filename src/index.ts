@@ -57,7 +57,8 @@ const compactActivity = (a: Json) =>
     pace: a.type?.includes("Run") ? pace(a.average_speed) : undefined,
     hr: round(a.average_heartrate, 0),
     hrMax: a.max_heartrate,
-    cadence: round(a.average_cadence, 0),
+    // intervals.icu stores run cadence per leg; double it to steps/min like Garmin shows.
+    cadence: round(a.type?.includes("Run") && a.average_cadence ? a.average_cadence * 2 : a.average_cadence, 0),
     load: a.icu_training_load,
     rpe: a.icu_rpe ?? a.perceived_exertion,
     feel: a.feel,
